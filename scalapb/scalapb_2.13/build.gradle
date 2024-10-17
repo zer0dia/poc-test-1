@@ -1,0 +1,24 @@
+dependencies {
+    implementation project(':grpc')
+    implementation project(':protobuf')
+
+    // ScalaPB
+    api libs.scalapb.json4s.v213
+    implementation libs.scalapb.runtime.v213
+    implementation libs.scalapb.runtime.grpc.v213
+
+    testImplementation libs.monix.reactive.v213
+}
+
+project.sourceSets.all { sourceSet ->
+    // Add the source directories for Scala 2.x only.
+    sourceSet.scala.srcDir file("src/${sourceSet.name}/scala_2")
+}
+
+sourceSets {
+    test {
+        scala {
+            srcDirs "${protobuf.generatedFilesBaseDir}/test/scalapb"
+        }
+    }
+}

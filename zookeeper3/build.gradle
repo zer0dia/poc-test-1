@@ -1,0 +1,13 @@
+dependencies {
+    // Curator
+    api libs.curator.recipes
+    api libs.curator.discovery
+
+    // ZooKeeper
+    api libs.zookeeper
+
+    testImplementation libs.finagle.serversets.v213
+    testImplementation libs.dropwizard.metrics.core
+    testImplementation libs.zookeeper.junit
+    testImplementation libs.snappy
+}

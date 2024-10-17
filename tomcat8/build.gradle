@@ -1,0 +1,36 @@
+dependencies {
+    // Tomcat
+    api libs.tomcat8.core
+
+    testImplementation libs.tomcat8.jasper
+
+    testImplementation("org.eclipse.jdt:ecj") {
+        version {
+            // As a workaround for JSP compiler error on Java 17, forcibly specify the newer version
+            strictly "3.24.0"
+        }
+    }
+
+    // Replace commons-logging (Tomcat's logging API) with SLF4J.
+    runtimeOnly libs.slf4j.jcl.over.slf4j
+}
+
+// Use the sources from ':tomcat10' as well as ours.
+// NB: We should never add these directories using the 'sourceSets' directive because that will make
+//     them added to more than one project and having a source directory with more than one output directory
+//     will confuse IDEs such as IntelliJ IDEA.
+def tomcat10ProjectDir = "${rootProject.projectDir}/tomcat10"
+// Copy common files from tomcat9 module to gen-src directory in order to use them as a source set.
+task generateSources(type: Copy) {
+    from "${tomcat10ProjectDir}/src/main/java"
+    into "${project.ext.genSrcDir}/main/java"
+    exclude '**/ArmeriaProcessor*'
+    exclude '**/ConfigFileLoaderInitializer*'
+    exclude '**/package-info.java'
+}
+
+tasks.compileJava.dependsOn(generateSources)
+tasks.compileTestJava.source "${tomcat10ProjectDir}/src/test/java"
+tasks.processResources.from "${tomcat10ProjectDir}/src/main/resources"
+tasks.processTestResources.from "${tomcat10ProjectDir}/src/test/resources"
+tasks.sourcesJar.from "${tomcat10ProjectDir}/src/main/resources"

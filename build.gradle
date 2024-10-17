@@ -1,0 +1,487 @@
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
+import org.jsoup.select.Elements
+
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+import static java.lang.Math.min
+
+buildscript {
+    dependencies {
+        classpath libs.jsoup
+    }
+}
+
+plugins {
+    id 'jvm-toolchains'
+    alias libs.plugins.osdetector apply false
+    alias libs.plugins.scalafmt apply false
+    alias libs.plugins.nexus.publish
+    alias libs.plugins.kotlin apply false
+    alias libs.plugins.ktlint apply false
+    alias libs.plugins.errorprone apply false
+    alias libs.plugins.nullaway apply false
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+}
+
+ext {
+    // Set the artifactId of 'armeria-core' to 'armeria'.
+    artifactIdOverrides = [':core': rootProject.name]
+}
+
+apply from: "${rootDir}/gradle/scripts/build-flags.gradle"
+
+// Fail the build if the console contains 'LEAK:'.
+def hasLeak = new AtomicBoolean()
+gradle.buildFinished({ result ->
+
+    if (hasLeak.get()) {
+        throw new TestExecutionException('Found a leak while testing. ' +
+                "Specify '-Pleak' option to record the detail and " +
+                'find it using the following command: \n\n' +
+                "    find . -type f -name 'TEST-*.xml' -exec grep -Fl 'LEAK: ' {} ';'\n")
+    }
+})
+
+def isCi = System.getenv("CI") != null
+allprojects {
+    // Add common JVM options such as max memory and leak detection.
+    tasks.withType(JavaForkOptions) {
+        maxHeapSize = '768m'
+
+        if (project.ext.testJavaVersion >= 9 || it.name == 'nativeImageTrace') {
+            jvmArgs '--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED'
+        }
+
+        // Enable leak detection when '-Pleak' option is specified.
+        if (rootProject.hasProperty('leak')) {
+            systemProperties 'io.netty.leakDetectionLevel': 'paranoid'
+            systemProperties 'io.netty.leakDetection.targetRecords': '256'
+        }
+    }
+
+    tasks.withType(Test) {
+        jvmArgumentProviders.add(new TestBuildDirArgumentsProvider(project.buildDir))
+
+        useJUnitPlatform()
+
+        // Do not omit stack frames for easier tracking.
+        jvmArgs '-XX:-OmitStackTraceInFastThrow'
+
+        // Drop heap dump and exit on OOME.
+        jvmArgs '-XX:+ExitOnOutOfMemoryError'
+        jvmArgs '-XX:+HeapDumpOnOutOfMemoryError'
+
+        // `-Djava.security.manager` was added in Java 17 and the default value was changed to
+        // `disallow` in Java 18.
+        // - https://openjdk.org/jeps/411
+        // - https://bugs.openjdk.org/browse/JDK-8270380
+        if (project.ext.testJavaVersion >= 17 || it.name == 'nativeImageTrace') {
+            systemProperty "java.security.manager", "allow"
+        }
+
+        // required by blockhound for jvm 13+. See https://github.com/reactor/BlockHound/issues/33.
+        if (rootProject.hasProperty('blockhound') && project.ext.testJavaVersion >= 13) {
+            jvmArgs "-XX:+AllowRedefinitionToAddDeleteMethods"
+        }
+
+        // Use verbose exception/response reporting for easier debugging.
+        systemProperty 'com.linecorp.armeria.verboseExceptions', 'true'
+        systemProperty 'com.linecorp.armeria.verboseResponses', 'true'
+
+        // Allow choosing the transport type by specifying `-PtransportType=<nio|epoll|io_uring|kqueue>`.
+        if (rootProject.hasProperty('transportType')) {
+            systemProperty('com.linecorp.armeria.transportType', "${rootProject.findProperty("transportType")}")
+        }
+
+        // Pass special system property to tell our tests that we are measuring coverage.
+        if (project.hasFlags('coverage')) {
+            systemProperty 'com.linecorp.armeria.testing.coverage', 'true'
+        }
+
+        // Parallelize if --parallel is on.
+        if (gradle.startParameter.parallelProjectExecutionEnabled) {
+            maxParallelForks = gradle.startParameter.maxWorkerCount
+        }
+
+        // Fail the build at the end if there was any leak.
+        // We do not fail immediately so that we collect as many leaks as possible.
+        doFirst {
+            addTestOutputListener({ descriptor, event ->
+                if (event.message.contains('LEAK: ')) {
+                    hasLeak.set(true)
+                }
+            })
+        }
+
+        develocity {
+            testRetry {
+                if (rootProject.findProperty('retry') == 'true') {
+                    maxRetries = 3
+                    failOnPassedAfterRetry = rootProject.findProperty('failOnPassedAfterRetry') != 'false'
+                }
+            }
+
+            predictiveTestSelection {
+                enabled.set(!isCi)
+            }
+        }
+    }
+}
+
+/**
+ * An argument provider which avoids task input inconsistency when builds are run
+ * from different locations. By handling this, we can take advantage of build caches
+ * when run from different locations. (i.e. remote build caches)
+ */
+class TestBuildDirArgumentsProvider implements CommandLineArgumentProvider {
+
+    TestBuildDirArgumentsProvider(File buildDir) {
+        this.heapDumpPath = buildDir.toPath().resolve("dump")
+        this.blockhoundReportPath = buildDir.toPath().resolve("blockhound.log")
+        // create the heap dump path in advance
+        heapDumpPath.toFile().mkdirs()
+    }
+
+    @LocalState
+    def heapDumpPath
+
+    @LocalState
+    def blockhoundReportPath
+
+    @Override
+    Iterable<String> asArguments() {
+        [
+                "-Dcom.linecorp.armeria.blockhound.reportFile=${blockhoundReportPath}",
+                "-XX:HeapDumpPath=${heapDumpPath}",
+        ]
+    }
+}
+
+// Configure all Java projects
+configure(projectsWithFlags('java')) {
+
+    // Error Prone compiler
+    if (!rootProject.hasProperty('noLint')) {
+        apply plugin: 'net.ltgt.errorprone'
+        apply plugin: 'net.ltgt.nullaway'
+
+        dependencies {
+            errorprone libs.errorprone.core
+            errorprone libs.nullaway
+        }
+
+        nullaway {
+            annotatedPackages.add("com.linecorp.armeria")
+        }
+
+        tasks.withType(JavaCompile) {
+            options.errorprone.excludedPaths = '.*/gen-src/.*'
+            options.errorprone.nullaway {
+                if (name.contains("Test") || name.contains("Jmh")) {
+                    // Disable NullAway for tests and benchmarks for now.
+                    disable()
+                } else if (name.matches(/compileJava[0-9]+.*/)) {
+                    // Disable MR-JAR classes which seem to confuse NullAway and break the build.
+                    disable()
+                } else {
+                    error()
+                    assertsEnabled = true
+                }
+            }
+        }
+    }
+
+    // Common dependencies
+    dependencies {
+        // All projects currently require ':core' (except itself)
+        if (project != project(':core')) {
+            api project(':core')
+        }
+
+        // Testing utilities
+        testImplementation project(':testing-internal')
+
+        // completable-futures
+        implementation libs.futures.completable
+
+        // Errorprone
+        compileOnly libs.errorprone.annotations
+        testImplementation libs.errorprone.annotations
+
+        // FastUtil
+        implementation libs.fastutil
+
+        // Guava
+        implementation libs.guava
+
+        // J2ObjC annotations
+        compileOnly libs.j2objc
+
+        // JSR305
+        implementation libs.findbugs
+
+        // JCTools
+        implementation libs.jctools
+
+        // Jetty ALPN support
+        compileOnly libs.jetty.alpn.api
+
+        // Logging
+        implementation libs.slf4j.api
+        testImplementation libs.slf4j.jul.to.slf4j
+        testImplementation libs.logback12
+        testRuntimeOnly libs.slf4j.jcl.over.slf4j
+        testRuntimeOnly libs.slf4j.log4j.over.slf4j
+
+        // Reflections
+        implementation libs.reflections
+
+        // Blockhound
+        optionalImplementation libs.blockhound
+
+        // Test-time dependencies
+        testImplementation libs.guava.testlib
+        testImplementation libs.junit4
+        testImplementation libs.junit5.jupiter.api
+        testImplementation libs.junit5.jupiter.params
+        testRuntimeOnly libs.junit5.platform.commons
+        testRuntimeOnly libs.junit5.platform.launcher
+        testRuntimeOnly libs.junit5.jupiter.engine
+        testRuntimeOnly libs.junit5.vintage.engine
+        testImplementation libs.json.unit
+        testImplementation libs.json.unit.fluent
+        testImplementation libs.awaitility
+        testRuntimeOnly libs.checkerframework // Required by guava-testlib
+        testImplementation libs.assertj
+        testImplementation libs.mockito
+        testImplementation libs.apache.httpclient5
+        testImplementation libs.hamcrest
+        testImplementation libs.hamcrest.library
+        testRuntimeOnly libs.kotlin.coroutines.debug
+
+        if (rootProject.hasProperty('blockhound')) {
+            testRuntimeOnly libs.blockhound.junit.platform
+        }
+    }
+
+    // Configure the default DuplicatesStrategy for such as:
+    // - c.l.armeria.versions.properties
+    // - thrift/cassandra.json
+    // - and so on
+    tasks.sourcesJar.duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    tasks.withType(Copy) {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+}
+
+allprojects {
+
+    // Configure the Javadoc tasks of all projects.
+    tasks.withType(Javadoc) {
+        options {
+            // Groups
+            group 'Server', 'com.linecorp.armeria.server*'
+            group 'Client', 'com.linecorp.armeria.client*'
+            group 'Common', 'com.linecorp.armeria.common*'
+
+            // Exclude the machine-generated or internal-only classes
+            exclude '**/Tomcat*ProtocolHandler.java'
+            exclude '**/internal/**'
+            exclude '**/thrift/v1/**'
+            exclude '**/reactor/core/scheduler/**'
+        }
+    }
+}
+
+// Require to use JDK 19 when releasing.
+tasks.closeAndReleaseStagingRepositories.doFirst {
+    if (JavaVersion.current() != JavaVersion.VERSION_21) {
+        throw new IllegalStateException("You must release using JDK 21.");
+    }
+}
+
+tasks.register("reportFailedTests", TestsReportTask)
+
+/**
+ * Summarizes the failed tests and reports as a file with the Markdown syntax.
+ */
+class TestsReportTask extends DefaultTask {
+    @OutputFile
+    final def reportFile = project.file("${project.buildDir}/failed-tests-result.txt")
+
+    @TaskAction
+    def run() {
+        // Collect up to 20 error results
+        int maxErrorSize = 20
+        List<Map> failedTests = []
+        Set<String> handledFiles = []
+
+        project.allprojects {
+            tasks.withType(Test) { testTask ->
+
+                def xmlFiles = testTask.reports.junitXml.outputLocation.asFileTree.files
+                if (xmlFiles.isEmpty()) {
+                    return
+                }
+                xmlFiles.each { file ->
+                    if (!handledFiles.add(file.name)) {
+                        return
+                    }
+
+                    Elements failures = Jsoup.parse(file, 'UTF-8').select("testsuite failure")
+                    if (failures.isEmpty() || failedTests.size() > maxErrorSize) {
+                        return
+                    }
+                    failures.each { failure ->
+                        Element parent = failure.parent()
+                        String fullMethodName = "${parent.attr("classname")}.${parent.attr("name")}"
+                        String detail = failure.wholeText()
+                        failedTests += [method: fullMethodName, detail: detail]
+                    }
+                }
+            }
+        }
+
+        if (failedTests.isEmpty()) {
+            return
+        }
+
+        reportFile.withPrintWriter('UTF-8') { writer ->
+            failedTests.each { it ->
+                String method = it.method
+                String detail = it.detail
+
+                // Create an link to directly create an issue from the error message
+                String ghIssueTitle = URLEncoder.encode("Test failure: `$method`", "UTF-8")
+                // 8k is the maximum allowed URL length for GitHub
+                String ghIssueBody = URLEncoder.encode(
+                        "```\n${detail.substring(0, min(6000, detail.length()))}\n```\n", "UTF-8")
+                String ghIssueLink =
+                        "https://github.com/line/armeria/issues/new?title=$ghIssueTitle&body=$ghIssueBody"
+                String ghSearchQuery = URLEncoder.encode("is:issue $method", "UTF-8")
+                String ghSearchLink = "https://github.com/line/armeria/issues?q=$ghSearchQuery"
+                writer.print("- $it.method - [Search similar issues]($ghSearchLink) | ")
+                writer.println("[Create an issue?]($ghIssueLink)")
+
+                writer.println("  ```")
+                List<String> lines = detail.split("\n") as List
+                def summary = lines.take(8)
+                summary.each { line -> writer.println("  $line") }
+                writer.println("  ```")
+                if (lines.size() > 8) {
+                    writer.println("  <details><summary>Full error messages</summary>")
+                    writer.println("  <pre>")
+                    lines.each { line -> writer.println("  $line") }
+                    writer.println("  </pre></details>\n")
+                }
+            }
+        }
+    }
+}
+
+def graalLauncher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(17))
+    vendor.set(JvmVendorSpec.GRAAL_VM)
+}.get()
+rootProject.ext.graalLauncher = graalLauncher
+
+def graalHome = graalLauncher.executablePath.asFile.toPath().parent.parent
+rootProject.ext.graalHome = graalHome
+
+tasks.register("installGraalNativeImage", Exec) {
+    onlyIf {
+        !Files.exists(graalHome.resolve("lib/svm/bin/native-image")) ||
+        !Files.exists(graalHome.resolve("lib/svm/bin/native-image-configure")) ||
+        !Files.exists(graalHome.resolve("lib/svm/bin/rebuild-images"))
+    }
+    commandLine(graalHome.resolve("lib/installer/bin/gu"), "install", "native-image")
+}
+
+def relocatedProjects = projectsWithFlags('java', 'relocate')
+def projectsWithNativeImageSupport = projectsWithFlags('java', 'relocate', 'native')
+def numConfiguredRelocatedProjects = new AtomicInteger()
+configure(relocatedProjects) {
+    if (projectsWithNativeImageSupport.contains(project)) {
+        def shadedTestTask = tasks.getByName('shadedTest') as Test
+        def copyShadedTestClassesTask = tasks.getByName('copyShadedTestClasses') as Copy
+        def nativeImageTraceFile =
+                "$rootDir/native-image-config/gen-src/traces/${project.path.replace(':', '-').substring(1)}.json"
+        project.ext.nativeImageTraceFile = Paths.get(nativeImageTraceFile)
+
+        tasks.register("nativeImageTrace", Test).configure {
+            group = "Build"
+            description = "Generates native-image trace for ${project.name} by running shaded tests."
+
+            dependsOn(rootProject.tasks.named('installGraalNativeImage'))
+            dependsOn(copyShadedTestClassesTask)
+            outputs.file(nativeImageTraceFile)
+
+            useJUnitPlatform {
+                includeTags('NATIVE_IMAGE_TRACE')
+            }
+
+            javaLauncher.set(graalLauncher)
+            maxParallelForks = 1
+
+            // Remove 'jetty-alpn-agent' and add 'native-image-agent'.
+            jvmArgs = jvmArgs.stream().filter {
+                !(it.startsWith('-javaagent:') && it.endsWith('jetty-alpn-agent.jar'))
+            }.collect() + [
+                    "-agentlib:native-image-agent=trace-output=$nativeImageTraceFile"
+            ]
+
+            testClassesDirs = files(copyShadedTestClassesTask.destinationDir)
+            classpath = testClassesDirs
+            setExcludes(shadedTestTask.excludes)
+            exclude("META-INF/versions/**") // Seems unsupported by GraalVM
+        }
+    }
+
+    afterEvaluate {
+        if (numConfiguredRelocatedProjects.incrementAndGet() == relocatedProjects.size()) {
+            relocatedProjects.each { p ->
+                if (projectsWithNativeImageSupport.contains(p)) {
+                    p.tasks.getByName('nativeImageTrace').configure {
+                        classpath += p.files(p.configurations.getByName('shadedJarTestRuntime').resolve())
+                    }
+                }
+            }
+        }
+    }
+}
+
+// additional configuration that can't be done at settings.gradle
+develocity {
+    buildScan {
+        // maintain a allowList so that sensitive information (credentials) aren't accidentally published.
+        Set<String> allowList = ['coverage', 'leak', 'blockhound', 'noLint', 'flakyTests', 'buildJdkVersion',
+                                 'testJavaVersion', 'minimumJavaVersion', 'retry', 'noWeb']
+        def self = owner
+        allowList.each { property ->
+            def provider = rootProject.providers.gradleProperty(property)
+            if (provider.isPresent()) {
+                self.value(property, provider.getOrElse(""))
+            }
+        }
+    }
+}
+
+allprojects {
+    normalization {
+        runtimeClasspath {
+            metaInf {
+                ignoreAttribute("Ant-Version")
+                ignoreAttribute("Created-By")
+            }
+        }
+    }
+}

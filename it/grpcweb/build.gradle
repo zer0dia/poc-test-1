@@ -1,0 +1,11 @@
+dependencies {
+    testImplementation project(':grpc')
+    testImplementation project(':grpc-protocol')
+
+    testImplementation libs.akka.http.cors.v213
+    testImplementation libs.akka.grpc.runtime.v213
+    testImplementation libs.akka.actor.typed.v213
+    testImplementation libs.akka.discovery.v213
+    testImplementation libs.akka.stream.v213
+    testImplementation libs.javax.annotation
+}

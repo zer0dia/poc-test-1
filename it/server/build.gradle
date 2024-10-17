@@ -1,0 +1,9 @@
+dependencies {
+    testImplementation project(':grpc')
+    testImplementation libs.okhttp2
+    testImplementation libs.grpc.core
+    testImplementation libs.grpc.interop.testing
+    testImplementation libs.grpc.okhttp
+    testImplementation libs.grpc.testing
+    testImplementation libs.hbase
+}

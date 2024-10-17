@@ -1,0 +1,9 @@
+dependencies {
+    api libs.sangria.v213
+    api libs.sangria.slowlog.v213
+
+    implementation project(':graphql-protocol')
+    implementation project(':scala_2.13')
+    implementation libs.jackson.scala.v213
+    implementation libs.scala.java8.compat.v213
+}

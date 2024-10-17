@@ -1,0 +1,31 @@
+dependencies {
+    implementation project(':jetty9')
+    // Dropwizard
+    api libs.dropwizard2.core
+    api libs.dropwizard2.util
+    api libs.dropwizard2.lifecycle
+    api libs.dropwizard2.jackson
+    api libs.dropwizard2.validation
+    api libs.dropwizard2.jersey
+    api libs.dropwizard2.jetty
+    
+    // Dropwizard Metrics
+    implementation libs.dropwizard.metrics.core
+
+    implementation libs.javax.validation
+
+    testImplementation libs.dropwizard2.testing
+}
+
+// Do not relocate Guava because it's part of Dropwizard's public API.
+[tasks.shadedJar, tasks.shadedTestJar].each { task ->
+    task.relocators.clear()
+    project.ext.relocations.each { Map<String, String> props ->
+        def from = props['from']
+        def to = props['to']
+        if (from in ['com.google.common', 'com.google.thirdparty.publicsuffix']) {
+            return
+        }
+        task.relocate from, to
+    }
+}

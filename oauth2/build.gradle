@@ -1,0 +1,5 @@
+dependencies {
+    // Caffeine
+    implementation libs.caffeine
+    testImplementation libs.jwt
+}

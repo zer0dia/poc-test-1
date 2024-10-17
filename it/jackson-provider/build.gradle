@@ -1,0 +1,7 @@
+// This module is for testing JacksonObjectMapperProvider.
+
+dependencies {
+    testImplementation libs.jackson.kotlin
+    testImplementation libs.jackson.scala.v213
+}
+

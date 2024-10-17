@@ -1,0 +1,19 @@
+dependencies {
+    api libs.junit4
+}
+
+// Copy common files from junit5 module to gen-src directory in order to use them as a source set.
+task generateSources(type: Copy) {
+    from "${rootProject.projectDir}/junit5/src/main/java/com/linecorp/armeria/internal/testing"
+    into "${project.ext.genSrcDir}/main/java/com/linecorp/armeria/internal/testing"
+}
+
+// Copy shared files from junit5 module to junit4 module.
+task copyJunitSources(type: Copy) {
+    from "${rootProject.projectDir}/junit5/src/main/java/com/linecorp/armeria/testing/server/ServiceRequestContextCaptor.java"
+    into "${project.ext.genSrcDir}/main/java/com/linecorp/armeria/testing/server"
+}
+
+tasks.compileJava.dependsOn(generateSources)
+tasks.compileJava.dependsOn(copyJunitSources)
+tasks.sourcesJar.dependsOn(copyJunitSources)

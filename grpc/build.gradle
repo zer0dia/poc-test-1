@@ -1,0 +1,35 @@
+dependencies {
+    implementation project(':grpc-protocol')
+    implementation project(':protobuf')
+
+    api libs.protobuf.java
+    implementation libs.protobuf.java.util
+
+    // gRPC
+    api libs.grpc.core
+    api libs.grpc.protobuf
+    api libs.grpc.services
+    api libs.grpc.stub
+
+    // gRPC-Kotlin
+    optionalImplementation libs.grpc.kotlin
+    optionalImplementation libs.kotlin.coroutines.core
+
+    api libs.protobuf.jackson
+
+    testImplementation(libs.gax.grpc) {
+        exclude group: 'com.google.protobuf', module: 'protobuf-java'
+    }
+    testImplementation project(':prometheus1')
+    testImplementation libs.grpc.okhttp
+    testImplementation libs.grpc.testing
+    testImplementation libs.micrometer.prometheus
+    testImplementation libs.reactor.test
+    testImplementation libs.reactivestreams.tck
+}
+
+tasks {
+    javadoc {
+        exclude '**/com/linecorp/armeria/common/grpc/InternalExceptionMessages**'
+    }
+}

@@ -1,0 +1,6 @@
+dependencies {
+    testImplementation project(':core')
+    testImplementation project(':grpc')
+    testImplementation libs.reactor.grpc.stub
+    testImplementation libs.javax.annotation
+}
